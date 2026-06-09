@@ -1,0 +1,50 @@
+ID: 1 | Pergunta: coronavirus origin
+ID: 2 | Pergunta: coronavirus response to weather changes
+ID: 3 | Pergunta: coronavirus immunity
+ID: 4 | Pergunta: how do people die from the coronavirus
+ID: 5 | Pergunta: animal models of COVID-19
+ID: 6 | Pergunta: coronavirus test rapid testing
+ID: 7 | Pergunta: serological tests for coronavirus
+ID: 8 | Pergunta: coronavirus under reporting
+ID: 9 | Pergunta: coronavirus in Canada
+ID: 10 | Pergunta: coronavirus social distancing impact
+ID: 11 | Pergunta: coronavirus hospital rationing
+ID: 12 | Pergunta: coronavirus quarantine
+ID: 13 | Pergunta: how does coronavirus spread
+ID: 14 | Pergunta: coronavirus super spreaders
+ID: 15 | Pergunta: coronavirus outside body
+ID: 16 | Pergunta: how long does coronavirus survive on surfaces
+ID: 17 | Pergunta: coronavirus clinical trials
+ID: 18 | Pergunta: masks prevent coronavirus
+ID: 19 | Pergunta: what alcohol sanitizer kills coronavirus
+ID: 20 | Pergunta: coronavirus and ACE inhibitors
+ID: 21 | Pergunta: coronavirus mortality
+ID: 22 | Pergunta: coronavirus heart impacts
+ID: 23 | Pergunta: coronavirus hypertension
+ID: 24 | Pergunta: coronavirus diabetes
+ID: 25 | Pergunta: coronavirus biomarkers
+ID: 26 | Pergunta: coronavirus early symptoms
+ID: 27 | Pergunta: coronavirus asymptomatic
+ID: 28 | Pergunta: coronavirus hydroxychloroquine
+ID: 29 | Pergunta: coronavirus drug repurposing
+ID: 30 | Pergunta: coronavirus remdesivir
+ID: 31 | Pergunta: difference between coronavirus and flu
+ID: 32 | Pergunta: coronavirus subtypes
+ID: 33 | Pergunta: coronavirus vaccine candidates
+ID: 34 | Pergunta: coronavirus recovery
+ID: 35 | Pergunta: coronavirus public datasets
+ID: 36 | Pergunta: SARS-CoV-2 spike structure
+ID: 37 | Pergunta: SARS-CoV-2 phylogenetic analysis
+ID: 38 | Pergunta: COVID inflammatory response
+ID: 39 | Pergunta: COVID-19 cytokine storm
+ID: 40 | Pergunta: coronavirus mutations
+ID: 41 | Pergunta: COVID-19 in African-Americans
+ID: 42 | Pergunta: Vitamin D and COVID-19
+ID: 43 | Pergunta: violence during pandemic
+ID: 44 | Pergunta: impact of masks on coronavirus transmission
+ID: 45 | Pergunta: coronavirus mental health impact
+ID: 46 | Pergunta: dexamethasone coronavirus
+ID: 47 | Pergunta: COVID-19 outcomes in children
+ID: 48 | Pergunta: school reopening coronavirus
+ID: 49 | Pergunta: post-infection COVID-19 immunity
+ID: 50 | Pergunta: mRNA vaccine coronavirus

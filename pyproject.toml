@@ -1,0 +1,15 @@
+[project]
+name = "ol2a-hackaton"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "ir-datasets",
+    "openai",
+    "faiss-cpu",
+    "sentence_transformers",
+    "transformers",
+    "torch",
+    "accelerate",
+    "psutil",
+    "bitsandbytes"
+]
