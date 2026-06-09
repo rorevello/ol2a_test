@@ -1,8 +1,10 @@
 import argparse
 import json
+import os
 import socket
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import gradio as gr
 
@@ -153,6 +155,12 @@ def parse_args() -> argparse.Namespace:
         help="Qwen model used when the CUDA pickle cannot be restored.",
     )
     parser.add_argument(
+        "--hf-home",
+        type=Path,
+        default=Path(__file__).resolve().parent / ".hf_cache",
+        help="Local Hugging Face cache used to load Qwen.",
+    )
+    parser.add_argument(
         "--device",
         choices=["auto", "cpu", "cuda"],
         default="auto",
@@ -169,15 +177,50 @@ def parse_args() -> argparse.Namespace:
         help="Remote model used to explain the retrieved evidence.",
     )
     parser.add_argument(
+        "--validator-base-url",
+        default=None,
+        help="OpenAI-compatible validator URL. Defaults to --llm-base-url.",
+    )
+    parser.add_argument(
+        "--validator-model",
+        default=None,
+        help="Validator model name. Defaults to --llm-model.",
+    )
+    parser.add_argument(
+        "--validation-attempts",
+        type=int,
+        default=3,
+        help="Maximum generation and validation attempts.",
+    )
+    parser.add_argument(
         "--top-k",
         type=int,
         default=4,
         help="Number of chunks to retrieve for each query.",
     )
     parser.add_argument(
+        "--evaluation-top-k",
+        type=int,
+        default=100,
+        help="Documents retrieved per topic during TREC-COVID evaluation.",
+    )
+    parser.add_argument(
+        "--topics-file",
+        type=Path,
+        default=Path(__file__).resolve().parent
+        / ".ir_datasets"
+        / "topics-rnd5.xml",
+        help="Official TREC-COVID topics XML used for retrieval evaluation.",
+    )
+    parser.add_argument(
         "--server-name",
+        default="auto",
+        help="IP shown to users. 'auto' detects the machine IP used to reach Hermes.",
+    )
+    parser.add_argument(
+        "--bind-host",
         default="0.0.0.0",
-        help="Host for the Gradio server.",
+        help="Network interface where Gradio listens. Use 0.0.0.0 for remote access.",
     )
     parser.add_argument(
         "--server-port",
@@ -231,17 +274,37 @@ def load_store_if_available(
         True,
         (
             f"Loaded `{index_path}` with {store.size:,} CORD-19 documents. "
-            f"Query vectorizer: {store.vectoriser_source}."
+           
         ),
     )
 
 
-def find_available_port(preferred_port: int, search_limit: int = 20) -> int:
+def detect_machine_ip(llm_base_url: str) -> str:
+    llm_host = urlparse(llm_base_url).hostname or "8.8.8.8"
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect((llm_host, 80))
+            return str(sock.getsockname()[0])
+    except OSError:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError as exc:
+            raise RuntimeError(
+                "The machine IP could not be detected. "
+                "Provide it with --server-name IP."
+            ) from exc
+
+
+def find_available_port(
+    preferred_port: int,
+    bind_host: str,
+    search_limit: int = 20,
+) -> int:
     for port in range(preferred_port, preferred_port + search_limit + 1):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                sock.bind(("127.0.0.1", port))
+                sock.bind((bind_host, port))
             except OSError:
                 continue
         return port
@@ -347,6 +410,18 @@ def build_follow_up_prompt(
 
 def main() -> None:
     args = parse_args()
+    if args.validation_attempts < 1:
+        raise ValueError("--validation-attempts must be greater than zero.")
+    if args.evaluation_top_k < 10:
+        raise ValueError("--evaluation-top-k must be at least 10.")
+    os.environ["HF_HOME"] = str(args.hf_home)
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    public_host = (
+        detect_machine_ip(args.llm_base_url)
+        if args.server_name == "auto"
+        else args.server_name
+    )
     store, live_mode, launch_message = load_store_if_available(
         index_path=args.qwen_index,
         dataset_name=args.dataset_name,
@@ -356,6 +431,20 @@ def main() -> None:
     )
     banner_class = "ok-banner" if live_mode else "warning-banner"
     system_status = "Connected" if live_mode else "Waiting for index"
+
+    def ensure_store_loaded():
+        nonlocal store, live_mode, launch_message
+        if live_mode and store is not None:
+            return store
+
+        store, live_mode, launch_message = load_store_if_available(
+            index_path=args.qwen_index,
+            dataset_name=args.dataset_name,
+            ir_datasets_home=args.ir_datasets_home,
+            embedding_model=args.embedding_model,
+            device=args.device,
+        )
+        return store
 
     def answer_question(prompt: str, top_k: int):
         if not prompt or not prompt.strip():
@@ -373,7 +462,8 @@ def main() -> None:
                 [],
             )
 
-        if not live_mode or store is None:
+        current_store = ensure_store_loaded()
+        if not live_mode or current_store is None:
             return (
                 format_answer_html(
                     "Vector store unavailable",
@@ -391,9 +481,9 @@ def main() -> None:
                 [],
             )
 
-        from rag_utils import query_hermes
+        from rag_utils import query_hermes_validated
 
-        results = store.search(prompt, top_k=top_k)
+        results = current_store.search(prompt, top_k=top_k)
         if not results:
             return (
                 format_answer_html(
@@ -411,17 +501,22 @@ def main() -> None:
 
         selected_choices = build_result_choices(results)
         try:
-            explanation = query_hermes(
+            validated = query_hermes_validated(
                 base_url=args.llm_base_url,
                 model_name=args.llm_model,
                 user_query=prompt,
                 retrieval_results=results,
+                validator_base_url=args.validator_base_url,
+                validator_model_name=args.validator_model,
+                max_attempts=args.validation_attempts,
             )
-            answer_title = "Hermes Explanation"
+            explanation = str(validated["answer"])
+            attempts = int(validated["attempts"])
+            answer_title = f"Validated Answer · attempt {attempts}"
         except Exception as exc:
-            answer_title = "Evidence retrieved"
+            answer_title = "No validated answer"
             explanation = (
-                "<p>The Qwen/FAISS search completed, but Hermes could not be reached.</p>"
+                "<p>The evidence was retrieved, but no answer passed validation.</p>"
                 f"<p><code>{exc}</code></p>"
             )
         return (
@@ -458,7 +553,8 @@ def main() -> None:
                 "",
             )
 
-        if not live_mode or store is None:
+        current_store = ensure_store_loaded()
+        if not live_mode or current_store is None:
             notice = {
                 "question": follow_up_question,
                 "answer": "The vector store is not available yet, so follow-up questions cannot be answered.",
@@ -483,17 +579,21 @@ def main() -> None:
                 "",
             )
 
-        from rag_utils import query_hermes
+        from rag_utils import query_hermes_validated
 
         try:
-            answer_text = query_hermes(
+            validated = query_hermes_validated(
                 base_url=args.llm_base_url,
                 model_name=args.llm_model,
                 user_query=build_follow_up_prompt(follow_up_question, history),
                 retrieval_results=selected_results,
+                validator_base_url=args.validator_base_url,
+                validator_model_name=args.validator_model,
+                max_attempts=args.validation_attempts,
             )
+            answer_text = str(validated["answer"])
         except Exception as exc:
-            answer_text = f"Could not generate a follow-up answer. Error: {exc}"
+            answer_text = f"No validated follow-up answer was produced. Error: {exc}"
 
         updated_history = history + [
             {
@@ -505,6 +605,51 @@ def main() -> None:
             render_follow_up_history(updated_history),
             updated_history,
             "",
+        )
+
+    def run_retrieval_evaluation():
+        current_store = ensure_store_loaded()
+        if not live_mode or current_store is None:
+            return (
+                "### Evaluation unavailable\n"
+                f"The vector index could not be loaded.\n\n`{launch_message}`"
+            )
+
+        try:
+            from retrieval_evaluation import (
+                evaluate_store,
+                load_dataset,
+                load_topics,
+            )
+
+            topics = load_topics(args.topics_file)
+            dataset = load_dataset(
+                args.dataset_name,
+                args.ir_datasets_home,
+            )
+            evaluation = evaluate_store(
+                store=current_store,
+                dataset=dataset,
+                topics=topics,
+                top_k=args.evaluation_top_k,
+            )
+        except Exception as exc:
+            return f"### Evaluation failed\n`{exc}`"
+
+        metrics = evaluation["metrics"]
+        return "\n".join(
+            [
+                "### TREC-COVID retrieval results",
+                f"- Topics evaluated: **{evaluation['query_count']}**",
+                f"- Retrieved documents: **{evaluation['document_count']}**",
+                f"- `P@10`: **{metrics.get('P@10', 0.0):.6f}**",
+                f"- `nDCG@10`: **{metrics.get('nDCG@10', 0.0):.6f}**",
+                f"- `RR`: **{metrics.get('RR', 0.0):.6f}**",
+                "",
+                "These metrics validate Qwen + FAISS retrieval. "
+                "They do not evaluate the wording of the Hermes answer; "
+                "that is handled separately by the answer validator.",
+            ]
         )
 
     examples = [
@@ -540,7 +685,7 @@ def main() -> None:
                     </div>
                     <div class="stat-card">
                       <div class="stat-label">Explanation model</div>
-                      <div class="stat-value">Hermes 4.3 36B</div>
+                      <div class="stat-value">Hermes + validator</div>
                     </div>
                   </div>
                 </section>
@@ -594,10 +739,11 @@ def main() -> None:
                             """
                         )
                         gr.Markdown(
-                            """
+                            f"""
                             - `Qwen` embeds the user query.
                             - `FAISS` searches the persisted `qwen.index`.
                             - `Hermes` generates the final explanation from retrieved evidence.
+                            - A validator approves it or requests up to {args.validation_attempts} attempts.
                             """
                         )
 
@@ -689,6 +835,22 @@ def main() -> None:
                         language="json",
                     )
 
+            with gr.Row():
+                with gr.Group(elem_classes=["panel"]):
+                    gr.Markdown(
+                        """
+                        <div class="panel-title">8. TREC-COVID Retrieval Evaluation</div>
+                        <div class="panel-subtitle">
+                          Run the 50 official topics against the same Qwen + FAISS
+                          backend used by this interface.
+                        </div>
+                        """
+                    )
+                    run_evaluation = gr.Button("Run retrieval evaluation")
+                    evaluation_output = gr.Markdown(
+                        "### Not evaluated\nPress the button to calculate retrieval metrics."
+                    )
+
         submit.click(
             fn=answer_question,
             inputs=[prompt, top_k],
@@ -722,6 +884,11 @@ def main() -> None:
                 follow_up_input,
             ],
         )
+        run_evaluation.click(
+            fn=run_retrieval_evaluation,
+            inputs=[],
+            outputs=[evaluation_output],
+        )
         clear.click(
             fn=lambda: (
                 "",
@@ -752,14 +919,16 @@ def main() -> None:
             ],
         )
 
-    launch_port = find_available_port(args.server_port)
+    launch_port = find_available_port(args.server_port, args.bind_host)
     if launch_port != args.server_port:
         print(
             f"Port {args.server_port} is busy. Launching Gradio on port {launch_port} instead."
         )
+    print(f"Gradio is listening on: {args.bind_host}:{launch_port}")
+    print(f"Open this URL: http://{public_host}:{launch_port}")
 
     demo.launch(
-        server_name=args.server_name,
+        server_name=args.bind_host,
         server_port=launch_port,
     )
 
