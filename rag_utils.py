@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -526,23 +527,23 @@ def build_context(
     max_context_chars: int = 24000,
 ) -> str:
     if not results:
-        return "No se recuperó contexto."
+        return "No context was retrieved."
 
     text_budget = max(1000, (max_context_chars // len(results)) - 300)
     blocks = []
     for i, result in enumerate(results, start=1):
         text = str(result["text"])
         if len(text) > text_budget:
-            text = text[:text_budget].rsplit(" ", 1)[0] + "\n[Texto truncado]"
+            text = text[:text_budget].rsplit(" ", 1)[0] + "\n[Text truncated]"
         blocks.append(
             "\n".join(
                 [
-                    f"Resultado {i}",
-                    f"Titulo: {result['title']}",
-                    f"Seccion: {result['section']}",
-                    f"Archivo: {result['source_path']}",
+                    f"Result {i}",
+                    f"Title: {result['title']}",
+                    f"Section: {result['section']}",
+                    f"Source: {result['source_path']}",
                     f"Score: {result['score']:.4f}",
-                    f"Texto: {text}",
+                    f"Text: {text}",
                 ]
             )
         )
@@ -556,11 +557,22 @@ def query_hermes(
     retrieval_results: List[Dict[str, object]],
     timeout: int = 120,
     max_context_chars: int = 24000,
+    previous_answer: Optional[str] = None,
+    revision_feedback: Optional[str] = None,
 ) -> str:
     context = build_context(
         retrieval_results,
         max_context_chars=max_context_chars,
     )
+    revision_request = ""
+    if previous_answer and revision_feedback:
+        revision_request = (
+            "\n\nThe previous answer was rejected by the validator.\n"
+            f"Previous answer:\n{previous_answer}\n\n"
+            f"Reason for rejection:\n{revision_feedback}\n\n"
+            "Generate a corrected answer that resolves all identified problems."
+        )
+
     payload = {
         "model": model_name,
         "temperature": 0.2,
@@ -568,16 +580,20 @@ def query_hermes(
             {
                 "role": "system",
                 "content": (
-                    "Eres un asistente experto en explicar resultados recuperados de una base vectorial. "
-                    "Responde en espanol, cita el titulo del documento cuando ayude, y aclara si la evidencia es parcial."
+                    "You are an expert assistant for explaining evidence retrieved "
+                    "from a scientific vector database. Always answer in English, "
+                    "even when the user writes in another language. Use only the "
+                    "retrieved evidence, cite document titles when useful, and "
+                    "clearly state when the evidence is incomplete or uncertain."
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    f"Consulta del usuario:\n{user_query}\n\n"
-                    f"Contexto recuperado:\n{context}\n\n"
-                    "Explica la respuesta usando solo el contexto recuperado."
+                    f"User question:\n{user_query}\n\n"
+                    f"Retrieved context:\n{context}\n\n"
+                    "Answer the question in English using only the retrieved context."
+                    f"{revision_request}"
                 ),
             },
         ],
@@ -593,7 +609,209 @@ def query_hermes(
         if len(detail) > 1000:
             detail = detail[:1000] + "..."
         raise RuntimeError(
-            f"Hermes devolvió HTTP {response.status_code}: {detail or 'sin detalle'}"
+            f"Hermes returned HTTP {response.status_code}: "
+            f"{detail or 'no error details'}"
         )
     data = response.json()
     return data["choices"][0]["message"]["content"].strip()
+
+
+def validate_answer(
+    base_url: str,
+    model_name: str,
+    user_query: str,
+    retrieval_results: List[Dict[str, object]],
+    candidate_answer: str,
+    timeout: int = 120,
+    max_context_chars: int = 20000,
+) -> Dict[str, object]:
+    context = build_context(
+        retrieval_results,
+        max_context_chars=max_context_chars,
+    )
+    payload = {
+        "model": model_name,
+        "temperature": 0.0,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict validator of RAG answers. Check that the "
+                    "candidate answers the question in English, is supported only "
+                    "by the retrieved context, does not invent facts or citations, "
+                    "and acknowledges insufficient evidence when appropriate. "
+                    "Return JSON only, using this exact structure: "
+                    '{"ok": true, "reason": "brief explanation in English"}.'
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Question:\n{user_query}\n\n"
+                    f"Retrieved context:\n{context}\n\n"
+                    f"Candidate answer:\n{candidate_answer}"
+                ),
+            },
+        ],
+    }
+    response = requests.post(
+        f"{base_url.rstrip('/')}/chat/completions",
+        json=payload,
+        timeout=timeout,
+    )
+    if not response.ok:
+        detail = response.text.strip()
+        if len(detail) > 1000:
+            detail = detail[:1000] + "..."
+        raise RuntimeError(
+            f"The validator returned HTTP {response.status_code}: "
+            f"{detail or 'no error details'}"
+        )
+
+    content = response.json()["choices"][0]["message"]["content"].strip()
+    if content.startswith("```"):
+        content = content.strip("`").strip()
+        if content.lower().startswith("json"):
+            content = content[4:].strip()
+    start = content.find("{")
+    end = content.rfind("}")
+    if start < 0 or end < start:
+        return {
+            "ok": False,
+            "reason": f"The validator did not return valid JSON: {content[:300]}",
+        }
+
+    try:
+        result = json.loads(content[start : end + 1])
+    except json.JSONDecodeError:
+        return {
+            "ok": False,
+            "reason": f"The validator returned malformed JSON: {content[:300]}",
+        }
+
+    ok = result.get("ok") is True
+    reason = str(result.get("reason") or "The validator did not provide a reason.")
+    return {"ok": ok, "reason": reason}
+
+
+def is_probably_english(text: str) -> bool:
+    words = re.findall(r"[a-záéíóúüñ]+", text.lower())
+    if not words:
+        return False
+
+    spanish_markers = {
+        "según",
+        "que",
+        "del",
+        "los",
+        "las",
+        "una",
+        "este",
+        "esta",
+        "estos",
+        "estas",
+        "para",
+        "por",
+        "con",
+        "como",
+        "mientras",
+        "mostró",
+        "hallazgos",
+        "sugieren",
+        "debería",
+        "humanos",
+        "células",
+        "proteína",
+        "respuesta",
+    }
+    english_markers = {
+        "the",
+        "that",
+        "this",
+        "these",
+        "those",
+        "with",
+        "from",
+        "for",
+        "and",
+        "was",
+        "were",
+        "has",
+        "have",
+        "shows",
+        "suggests",
+        "evidence",
+        "answer",
+        "human",
+        "cells",
+        "protein",
+    }
+    spanish_count = sum(word in spanish_markers for word in words)
+    english_count = sum(word in english_markers for word in words)
+    has_spanish_characters = bool(re.search(r"[áéíóúüñ¿¡]", text.lower()))
+
+    if spanish_count >= 4 and spanish_count > english_count:
+        return False
+    if has_spanish_characters and spanish_count >= 2 and english_count == 0:
+        return False
+    return True
+
+
+def query_hermes_validated(
+    base_url: str,
+    model_name: str,
+    user_query: str,
+    retrieval_results: List[Dict[str, object]],
+    validator_base_url: Optional[str] = None,
+    validator_model_name: Optional[str] = None,
+    max_attempts: int = 3,
+    timeout: int = 120,
+) -> Dict[str, object]:
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be greater than zero.")
+
+    validator_base_url = validator_base_url or base_url
+    validator_model_name = validator_model_name or model_name
+    previous_answer: Optional[str] = None
+    feedback: Optional[str] = None
+
+    for attempt in range(1, max_attempts + 1):
+        answer = query_hermes(
+            base_url=base_url,
+            model_name=model_name,
+            user_query=user_query,
+            retrieval_results=retrieval_results,
+            timeout=timeout,
+            previous_answer=previous_answer,
+            revision_feedback=feedback,
+        )
+        if not is_probably_english(answer):
+            previous_answer = answer
+            feedback = (
+                "The candidate answer is not written in English. Rewrite the "
+                "entire answer in English. Keep only proper names and exact "
+                "document titles in their original language when necessary."
+            )
+            continue
+
+        validation = validate_answer(
+            base_url=validator_base_url,
+            model_name=validator_model_name,
+            user_query=user_query,
+            retrieval_results=retrieval_results,
+            candidate_answer=answer,
+            timeout=timeout,
+        )
+        if validation["ok"]:
+            return {
+                "answer": answer,
+                "attempts": attempt,
+                "validation_reason": validation["reason"],
+            }
+        previous_answer = answer
+        feedback = str(validation["reason"])
+
+    raise RuntimeError(
+        f"No answer was approved after {max_attempts} attempts. "
+        f"Last validation reason: {feedback}"
+    )
