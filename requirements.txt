@@ -1,0 +1,7 @@
+faiss-cpu
+gradio
+ir-datasets
+numpy
+requests
+sentence-transformers
+torch
